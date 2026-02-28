@@ -27,13 +27,19 @@
             "onFinalized": false
         },
         "mempool": {
-            "txFeed": false
+            "txFeed": true
         },
         "api": {
             "addEndpoints": true,
             "addWebsocket": false,
             "basePath": "/plugins/ordinals-oracle",
             "routes": [
+                {
+                    "path": "health",
+                    "method": "GET",
+                    "handler": "handleHealth",
+                    "rateLimit": 120
+                },
                 {
                     "path": "attestation/:txid",
                     "method": "GET",

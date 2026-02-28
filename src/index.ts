@@ -1,6 +1,7 @@
 import { PluginBase } from '@btc-vision/plugin-sdk';
 import type {
     IBlockData,
+    IMempoolTransaction,
     IPluginContext,
     IPluginHttpRequest,
     IPluginRouter,
@@ -52,8 +53,21 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
     /** Latest known OPNet block height — updated on every block. */
     private currentBlockHeight: number = 0;
 
+    /** Unix timestamp (ms) when the plugin was loaded — for uptime tracking. */
+    private startedAt: number = 0;
+
+    /**
+     * Txids seen in the mempool that sent to the burn address.
+     * We can't inspect full TX structure from the mempool hook (SDK only gives txid),
+     * so we store all txids seen in mempool and let scanBlock confirm them when the
+     * block arrives. This set also drives the health endpoint's "pending" count.
+     * Cleared after each block (confirmed txids are now in DB).
+     */
+    private readonly mempoolWatched: Set<string> = new Set();
+
     public override async onLoad(context: IPluginContext): Promise<void> {
         await super.onLoad(context);
+        this.startedAt = Date.now();
 
         const config = this.context.config.get<IOracleConfig>('oracle');
         if (config === undefined) {
@@ -95,6 +109,7 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
      *   GET /burns               — Lists all detected burns (for debugging)
      */
     public override registerRoutes(router: IPluginRouter): void {
+        router.get('/health', 'handleHealth');
         router.get('/attestation/:txid', 'handleGetAttestation');
         router.get('/burns', 'handleListBurns');
     }
@@ -107,8 +122,21 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
      *
      * @param block - Raw Bitcoin block data
      */
+    /**
+     * Called by the OPNet node for each transaction entering the mempool.
+     *
+     * We only receive the txid here (no vout/vin data). We store it in
+     * `mempoolWatched` so the health endpoint can report pending activity.
+     * Actual burn detection happens in `onBlockPreProcess` once confirmed.
+     */
+    public override async onMempoolTransaction(tx: IMempoolTransaction): Promise<void> {
+        this.mempoolWatched.add(tx.txid);
+    }
+
     public override async onBlockPreProcess(block: IBlockData): Promise<void> {
         this.currentBlockHeight = block.height;
+        // Clear mempool watch set — confirmed txids are now processed by scanBlock
+        this.mempoolWatched.clear();
 
         let burns: readonly IVerifiedBurn[];
 
@@ -160,6 +188,55 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
     }
 
     // ─── HTTP Handlers ───────────────────────────────────────────────────────────
+
+    /**
+     * Health check endpoint. Call this before showing the burn UI.
+     *
+     * Response:
+     * ```json
+     * {
+     *   "status": "ok",
+     *   "currentBlockHeight": 850000,
+     *   "uptimeSeconds": 3600,
+     *   "burnsDetected": 42,
+     *   "mempoolWatched": 3,
+     *   "oraclePublicKeyHash": "64hexchars",
+     *   "db": true
+     * }
+     * ```
+     *
+     * `status` is "ok" when the oracle is operational.
+     * `status` is "degraded" when the database is unavailable (burns cannot be stored).
+     *
+     * ⚠️  A successful health check does NOT guarantee the oracle will still be
+     * online when your burn confirms. Attestations are valid for `ttlBlocks` OPNet
+     * blocks (~24h at default settings), so the oracle can go offline briefly after
+     * your burn and you can still claim once it comes back.
+     */
+    public async handleHealth(_request: IPluginHttpRequest): Promise<object> {
+        const dbOk = this.context.db !== undefined;
+        let burnsDetected = 0;
+
+        if (dbOk) {
+            try {
+                burnsDetected = await this.context.db!
+                    .collection(BURNS_COLLECTION)
+                    .countDocuments();
+            } catch {
+                // non-fatal
+            }
+        }
+
+        return {
+            status: dbOk ? 'ok' : 'degraded',
+            currentBlockHeight: this.currentBlockHeight,
+            uptimeSeconds: Math.floor((Date.now() - this.startedAt) / 1000),
+            burnsDetected,
+            mempoolWatched: this.mempoolWatched.size,
+            oraclePublicKeyHash: this.attestationSigner.publicKeyHash,
+            db: dbOk,
+        };
+    }
 
     /**
      * Returns a signed oracle attestation for a confirmed burn transaction.
