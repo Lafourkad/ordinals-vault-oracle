@@ -1,6 +1,6 @@
 import type { IBlockData, ITransactionData, IVOut } from '@btc-vision/plugin-sdk';
 import { OrdClient } from './OrdClient.js';
-import type { IVerifiedBurn } from '../types/index.js';
+import type { IOrdTxOutput, IVerifiedBurn } from '../types/index.js';
 
 /** OP_RETURN opcode prefix in hex */
 const OP_RETURN_HEX = '6a';
@@ -51,6 +51,64 @@ export class BurnWatcher {
             const result = await this.processTx(tx, block.height);
             if (result !== null) {
                 burns.push(...result);
+            }
+        }
+
+        return burns;
+    }
+
+    /**
+     * Detects burns in an unconfirmed mempool transaction using the ord REST API.
+     *
+     * This is called from `onMempoolTransaction` as soon as a TX enters the mempool.
+     * If a burn is detected, it's stored immediately in DB so users don't have to
+     * wait for block confirmation to get an attestation.
+     *
+     * ord may not have indexed the mempool TX yet (returns 404). In that case we
+     * return [] and fall back to normal block scanning when it confirms.
+     *
+     * Note: `blockHeight` is set to 0 for unconfirmed burns. The block scanning
+     * will attempt to re-store the same txid (duplicate key → ignored).
+     *
+     * @param txid - Mempool transaction ID
+     * @returns Detected burns, or [] if TX not in ord yet or not a burn
+     */
+    public async scanMempoolTx(txid: string): Promise<readonly IVerifiedBurn[]> {
+        const tx = await this.ordClient.getTx(txid);
+        if (tx === null) {
+            // ord hasn't indexed this mempool TX yet — that's fine
+            return [];
+        }
+
+        // Check for burn address output
+        const hasBurnOutput = tx.output.some((out) => out.address === this.burnAddress);
+        if (!hasBurnOutput) {
+            return [];
+        }
+
+        // Extract OPNet address from OP_RETURN
+        const opnetAddress = this.extractOpnetAddressFromOrdOutputs(tx.output);
+        if (opnetAddress === null) {
+            return [];
+        }
+
+        // Scan inputs for inscriptions
+        const burns: IVerifiedBurn[] = [];
+        for (const input of tx.input) {
+            if (input.txid === null || input.vout === null) {
+                continue; // coinbase
+            }
+            const output = await this.ordClient.getOutput(input.txid, input.vout);
+            if (output === null || output.inscriptions.length === 0) {
+                continue;
+            }
+            for (const inscriptionId of output.inscriptions) {
+                burns.push({
+                    inscriptionId,
+                    burnerOpnetAddress: opnetAddress,
+                    blockHeight: 0, // unconfirmed
+                    txid,
+                });
             }
         }
 
@@ -114,6 +172,20 @@ export class BurnWatcher {
             return hex.slice(OPNET_ADDRESS_OFFSET);
         }
 
+        return null;
+    }
+
+    /**
+     * Extracts the OPNet address from ord-format outputs (mempool path).
+     * ord uses `script_pubkey` (flat hex string) instead of `scriptPubKey.hex`.
+     */
+    private extractOpnetAddressFromOrdOutputs(outputs: readonly IOrdTxOutput[]): string | null {
+        for (const out of outputs) {
+            const hex = out.script_pubkey;
+            if (!hex.startsWith(OP_RETURN_HEX)) continue;
+            if (hex.length !== BURN_OP_RETURN_HEX_LENGTH) continue;
+            return hex.slice(OPNET_ADDRESS_OFFSET);
+        }
         return null;
     }
 

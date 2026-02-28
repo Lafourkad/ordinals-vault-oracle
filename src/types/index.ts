@@ -8,6 +8,28 @@ export interface IOrdOutput {
     readonly value: number;
 }
 
+/** Ord REST API response for GET /tx/{txid} */
+export interface IOrdTxInput {
+    readonly txid: string | null;
+    readonly vout: number | null;
+    readonly coinbase: string | null;
+    readonly sequence: number;
+}
+
+export interface IOrdTxOutput {
+    readonly value: number;
+    readonly script_pubkey: string;
+    readonly address: string | null;
+}
+
+export interface IOrdTransaction {
+    readonly txid: string;
+    readonly version: number;
+    readonly lock_time: number;
+    readonly input: readonly IOrdTxInput[];
+    readonly output: readonly IOrdTxOutput[];
+}
+
 /** A burn detected in a Bitcoin block, verified via local ord node */
 export interface IVerifiedBurn {
     readonly inscriptionId: string;

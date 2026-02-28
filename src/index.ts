@@ -129,8 +129,37 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
      * `mempoolWatched` so the health endpoint can report pending activity.
      * Actual burn detection happens in `onBlockPreProcess` once confirmed.
      */
+    /**
+     * Called for each transaction entering the mempool.
+     *
+     * We fetch the full TX from the local ord node and run burn detection
+     * immediately. If a burn is found, it's stored in DB right away — users
+     * can fetch their attestation as soon as the TX is in the mempool,
+     * without waiting for block confirmation.
+     *
+     * If ord hasn't indexed the mempool TX yet (404), we fall back to normal
+     * block scanning when the TX confirms.
+     */
     public override async onMempoolTransaction(tx: IMempoolTransaction): Promise<void> {
         this.mempoolWatched.add(tx.txid);
+
+        let burns: readonly IVerifiedBurn[];
+        try {
+            burns = await this.burnWatcher.scanMempoolTx(tx.txid);
+        } catch {
+            // ord unavailable or TX not indexed yet — block scan will catch it
+            return;
+        }
+
+        if (burns.length === 0) return;
+
+        this.context.logger.info(
+            `Mempool: ${burns.length.toString()} burn(s) detected in unconfirmed TX ${tx.txid}`,
+        );
+
+        for (const burn of burns) {
+            await this.storeBurn(burn);
+        }
     }
 
     public override async onBlockPreProcess(block: IBlockData): Promise<void> {

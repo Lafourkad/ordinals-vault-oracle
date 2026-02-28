@@ -1,4 +1,4 @@
-import type { IOrdOutput } from '../types/index.js';
+import type { IOrdOutput, IOrdTransaction } from '../types/index.js';
 
 /**
  * HTTP client for the local ord node REST API.
@@ -46,6 +46,33 @@ export class OrdClient {
         }
 
         return (await response.json()) as IOrdOutput;
+    }
+
+    /**
+     * Fetches a full transaction from the local ord node.
+     *
+     * Used by the mempool hook to inspect unconfirmed burn transactions
+     * as soon as they enter the mempool — before block confirmation.
+     *
+     * @param txid - The transaction ID
+     * @returns Full transaction data, or null on 404 (TX not yet indexed by ord)
+     */
+    public async getTx(txid: string): Promise<IOrdTransaction | null> {
+        const url = `${this.baseUrl}/tx/${txid}`;
+
+        const response = await fetch(url, {
+            headers: { Accept: 'application/json' },
+        });
+
+        if (response.status === 404) {
+            return null;
+        }
+
+        if (!response.ok) {
+            throw new Error(`Ord /tx/${txid} returned ${response.status.toString()}`);
+        }
+
+        return (await response.json()) as IOrdTransaction;
     }
 
     /**
