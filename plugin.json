@@ -30,8 +30,23 @@
             "txFeed": false
         },
         "api": {
-            "addEndpoints": false,
-            "addWebsocket": false
+            "addEndpoints": true,
+            "addWebsocket": false,
+            "basePath": "/plugins/ordinals-oracle",
+            "routes": [
+                {
+                    "path": "attestation/:txid",
+                    "method": "GET",
+                    "handler": "handleGetAttestation",
+                    "rateLimit": 60
+                },
+                {
+                    "path": "burns",
+                    "method": "GET",
+                    "handler": "handleListBurns",
+                    "rateLimit": 30
+                }
+            ]
         },
         "filesystem": {
             "configDir": true,

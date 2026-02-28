@@ -1,48 +1,55 @@
-import { PluginBase, type IBlockData } from '@btc-vision/plugin-sdk';
-import type { IPluginContext, IReorgData } from '@btc-vision/plugin-sdk';
-import { JSONRpcProvider } from 'opnet';
+import { PluginBase } from '@btc-vision/plugin-sdk';
+import type {
+    IBlockData,
+    IPluginContext,
+    IPluginHttpRequest,
+    IPluginRouter,
+    IReorgData,
+} from '@btc-vision/plugin-sdk';
 import { networks } from '@btc-vision/bitcoin';
 import { OrdClient } from './services/OrdClient.js';
 import { BurnWatcher } from './services/BurnWatcher.js';
-import { ContractCaller } from './services/ContractCaller.js';
-import type { IOracleConfig, IVerifiedBurn } from './types/index.js';
+import { AttestationSigner } from './services/AttestationSigner.js';
+import type { IAttestation, IOracleConfig, IVerifiedBurn } from './types/index.js';
+
+/** MongoDB collection name for detected burns */
+const BURNS_COLLECTION = 'oracle_burns';
+
+type HandlerResult<T> = T | { readonly error: string };
 
 /**
- * OrdinalsVault Oracle Plugin
+ * OrdinalsVault Oracle Plugin — Gasless Edition
  *
- * Watches every Bitcoin block for Ordinal burn transactions sent to a
- * configured `burnAddress`. For each detected burn:
+ * This plugin has two responsibilities:
  *
- * 1. Queries the local ord node to identify the burned inscription(s)
- * 2. Reads the burner's OPNet address from the `OP_RETURN` output
- * 3. Calls `recordBurn(inscriptionId, burner)` on the OrdinalsVault contract
+ * 1. WATCH blocks for Ordinal burns (onBlockPreProcess).
+ *    Scans every Bitcoin TX for outputs to `burnAddress`. Reads the burner's
+ *    OPNet address from the OP_RETURN output. Verifies inscriptions via the
+ *    local ord node. Stores detected burns in MongoDB.
  *
- * Burn transaction format (must be followed by wallets/dapps):
- * ```
- * vin[0]:  UTXO holding the inscription
- * vout[0]: <burnAddress>              ← inscription lands here
- * vout[1]: OP_RETURN <opnet_addr_32_bytes>  ← minting address
- * vout[2]: change (optional)
- * ```
+ * 2. SERVE attestations via HTTP (GET /attestation/:txid).
+ *    When a user requests an attestation for their burn TX, the oracle signs
+ *    it off-chain using Schnorr (BIP340) and returns the signature.
+ *    The user submits it to the contract themselves — oracle pays ZERO gas.
  *
  * Plugin config (plugin.config.json):
  * ```json
  * {
- *   "vaultContractAddress": "op1q...",
- *   "burnAddress":          "bc1p...",
- *   "ordNodeUrl":           "http://localhost:80",
- *   "opnetRpcUrl":          "https://mainnet.opnet.org/json-rpc",
- *   "oraclePrivateKeyWIF":  "KwDiBf...",
- *   "maxSatToSpend":        10000,
- *   "network":              "mainnet"
+ *   "oracle": {
+ *     "burnAddress":            "bc1p...",
+ *     "ordNodeUrl":             "http://localhost:80",
+ *     "vaultContractAddress":   "op1q...",
+ *     "oraclePrivateKeyWIF":    "KwDiBf...",
+ *     "attestationTtlSeconds":  3600,
+ *     "network":                "mainnet"
+ *   }
  * }
  * ```
  */
 export default class OrdinalsVaultOraclePlugin extends PluginBase {
     private ordClient!: OrdClient;
     private burnWatcher!: BurnWatcher;
-    private contractCaller!: ContractCaller;
-    private provider!: JSONRpcProvider;
+    private attestationSigner!: AttestationSigner;
 
     public override async onLoad(context: IPluginContext): Promise<void> {
         await super.onLoad(context);
@@ -54,32 +61,48 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
 
         const network = config.network === 'mainnet' ? networks.bitcoin : networks.regtest;
 
-        this.provider = new JSONRpcProvider(config.opnetRpcUrl, network);
         this.ordClient = new OrdClient(config.ordNodeUrl);
         this.burnWatcher = new BurnWatcher(this.ordClient, config.burnAddress);
-        this.contractCaller = new ContractCaller(config, network);
-
-        this.context.logger.info(
-            `OrdinalsVaultOracle loaded — watching burns to ${config.burnAddress}`,
+        this.attestationSigner = new AttestationSigner(
+            config.oraclePrivateKeyWIF,
+            config.vaultContractAddress,
+            network,
+            config.attestationTtlSeconds ?? 3600,
         );
 
         if (this.context.db !== undefined) {
             await this.context.db
-                .collection('oracle_burns')
+                .collection(BURNS_COLLECTION)
                 .createIndex({ burnTxid: 1 }, { unique: true });
             await this.context.db
-                .collection('oracle_burns')
+                .collection(BURNS_COLLECTION)
                 .createIndex({ blockHeight: -1 });
         }
+
+        this.context.logger.info(
+            `OrdinalsVaultOracle loaded — watching burns to ${config.burnAddress} (gasless mode)`,
+        );
     }
 
     /**
-     * Receives raw Bitcoin block data. Called before OPNet processes the block.
+     * Registers REST endpoints on the OPNet node.
      *
-     * This is where we detect burns: scan every TX output for the burn address,
-     * then resolve inscriptions on the inputs via the local ord node.
+     * Available routes:
+     *   GET /attestation/:txid   — Returns a signed attestation for a burn TX
+     *   GET /burns               — Lists all detected burns (for debugging)
+     */
+    public override registerRoutes(router: IPluginRouter): void {
+        router.get('/attestation/:txid', 'handleGetAttestation');
+        router.get('/burns', 'handleListBurns');
+    }
+
+    /**
+     * Scans raw Bitcoin blocks for Ordinal burns.
      *
-     * @param block - Raw Bitcoin block (Bitcoin Core `getblock` verbosity=2 format)
+     * Detected burns are stored in MongoDB. They become available for
+     * attestation signing immediately after detection.
+     *
+     * @param block - Raw Bitcoin block data
      */
     public override async onBlockPreProcess(block: IBlockData): Promise<void> {
         let burns: readonly IVerifiedBurn[];
@@ -102,74 +125,157 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
         );
 
         for (const burn of burns) {
-            await this.submitBurn(burn);
+            await this.storeBurn(burn);
         }
     }
 
     /**
-     * CRITICAL: Chain reorganization handler.
+     * Handles chain reorganizations.
      *
-     * Must delete all burn records for reorged blocks to prevent
-     * double-minting when the reorged blocks are re-processed.
+     * Deletes stored burns from reorged blocks so they don't get re-attested
+     * with stale data. Burns will be re-detected when the new chain is processed.
      *
-     * @param reorg - Reorg data (fromBlock = first reorged block height)
+     * @param reorg - Reorg data (fromBlock = first reorged block)
      */
     public override async onReorg(reorg: IReorgData): Promise<void> {
         this.context.logger.warn(
-            `Reorg detected — purging burns from block ${reorg.fromBlock.toString()} onward`,
+            `Reorg: purging burns from block ${reorg.fromBlock.toString()} onward`,
         );
 
         if (this.context.db !== undefined) {
-            await this.context.db.collection('oracle_burns').deleteMany({
-                blockHeight: { $gte: reorg.fromBlock },
-            });
+            await this.context.db
+                .collection(BURNS_COLLECTION)
+                .deleteMany({ blockHeight: { $gte: reorg.fromBlock } });
         }
     }
 
     public override async onUnload(): Promise<void> {
         this.context.logger.info('OrdinalsVaultOracle unloading');
-        await this.provider.close();
         await super.onUnload();
     }
 
-    // ─── Private Helpers ────────────────────────────────────────────────────────
+    // ─── HTTP Handlers ───────────────────────────────────────────────────────────
 
-    private async submitBurn(burn: IVerifiedBurn): Promise<void> {
+    /**
+     * Returns a signed oracle attestation for a confirmed burn transaction.
+     *
+     * The user fetches this and submits it to the contract via
+     * `recordBurnWithAttestation(inscriptionId, burner, deadline, nonce, sig)`.
+     *
+     * Each request generates a fresh nonce + signature. Multiple valid
+     * attestations can exist for the same burn — only the first one submitted
+     * on-chain consumes a nonce (others remain valid until their deadline).
+     *
+     * Response:
+     * ```json
+     * {
+     *   "txid": "abc...",
+     *   "inscriptionId": "abc...i0",
+     *   "burner": "64hexchars",
+     *   "deadline": 1700000000,
+     *   "nonce": "64hexchars",
+     *   "oracleSig": "128hexchars"
+     * }
+     * ```
+     *
+     * @param request - HTTP request with txid param
+     */
+    public async handleGetAttestation(
+        request: IPluginHttpRequest,
+    ): Promise<HandlerResult<IAttestation>> {
+        const txid = request.params['txid'];
+
+        if (txid === undefined || txid.length !== 64) {
+            return { error: 'Invalid txid — must be a 64-char hex string' };
+        }
+
+        if (this.context.db === undefined) {
+            return { error: 'Database not available' };
+        }
+
+        const burn = await this.context.db
+            .collection(BURNS_COLLECTION)
+            .findOne({ burnTxid: txid });
+
+        if (burn === null) {
+            return {
+                error: 'Burn not found — TX not detected yet or not a valid burn transaction',
+            };
+        }
+
+        const verifiedBurn: IVerifiedBurn = {
+            inscriptionId: burn['inscriptionId'] as string,
+            burnerOpnetAddress: burn['burnerOpnetAddress'] as string,
+            blockHeight: burn['blockHeight'] as number,
+            txid: burn['burnTxid'] as string,
+        };
+
         try {
-            // Idempotency check — skip if already recorded in a previous run
-            if (this.context.db !== undefined) {
-                const existing = await this.context.db
-                    .collection('oracle_burns')
-                    .findOne({ burnTxid: burn.txid, inscriptionId: burn.inscriptionId });
+            return this.attestationSigner.sign(verifiedBurn);
+        } catch (err: unknown) {
+            this.context.logger.error(`Attestation signing failed: ${this.errMsg(err)}`);
+            return { error: 'Attestation signing failed' };
+        }
+    }
 
-                if (existing !== null) {
-                    this.context.logger.debug(
-                        `Already recorded: inscription=${burn.inscriptionId} txid=${burn.txid}`,
-                    );
-                    return;
-                }
-            }
+    /**
+     * Lists all detected burns (paginated, newest first). For debugging/UX.
+     *
+     * Query params:
+     *   limit  — max results (default 50, max 200)
+     *   offset — skip N results
+     *
+     * @param request - HTTP request with optional query params
+     */
+    public async handleListBurns(
+        request: IPluginHttpRequest,
+    ): Promise<HandlerResult<{ readonly burns: unknown[]; readonly total: number }>> {
+        if (this.context.db === undefined) {
+            return { error: 'Database not available' };
+        }
 
-            const recordTxid = await this.contractCaller.submitBurn(burn, this.provider);
+        const limit = Math.min(Number(request.query['limit'] ?? 50), 200);
+        const offset = Number(request.query['offset'] ?? 0);
+
+        const [burns, total] = await Promise.all([
+            this.context.db
+                .collection(BURNS_COLLECTION)
+                .find({})
+                .sort({ blockHeight: -1 })
+                .skip(offset)
+                .limit(limit)
+                .toArray(),
+            this.context.db.collection(BURNS_COLLECTION).countDocuments(),
+        ]);
+
+        return { burns, total };
+    }
+
+    // ─── Private Helpers ─────────────────────────────────────────────────────────
+
+    private async storeBurn(burn: IVerifiedBurn): Promise<void> {
+        if (this.context.db === undefined) {
+            return;
+        }
+
+        try {
+            await this.context.db.collection(BURNS_COLLECTION).insertOne({
+                burnTxid: burn.txid,
+                inscriptionId: burn.inscriptionId,
+                burnerOpnetAddress: burn.burnerOpnetAddress,
+                blockHeight: burn.blockHeight,
+                detectedAt: Date.now(),
+            });
 
             this.context.logger.info(
-                `recordBurn OK — inscription=${burn.inscriptionId} burner=${burn.burnerOpnetAddress} recordTx=${recordTxid ?? 'unknown'}`,
+                `Stored burn — inscription=${burn.inscriptionId} burner=${burn.burnerOpnetAddress}`,
             );
-
-            if (this.context.db !== undefined) {
-                await this.context.db.collection('oracle_burns').insertOne({
-                    inscriptionId: burn.inscriptionId,
-                    burnerOpnetAddress: burn.burnerOpnetAddress,
-                    blockHeight: burn.blockHeight,
-                    burnTxid: burn.txid,
-                    recordTxid,
-                    timestamp: Date.now(),
-                });
-            }
         } catch (err: unknown) {
-            this.context.logger.error(
-                `Failed to record burn for inscription ${burn.inscriptionId}: ${this.errMsg(err)}`,
-            );
+            // Duplicate key = already stored, safe to ignore
+            if (this.errMsg(err).includes('duplicate') || this.errMsg(err).includes('E11000')) {
+                return;
+            }
+            this.context.logger.error(`Failed to store burn: ${this.errMsg(err)}`);
         }
     }
 
