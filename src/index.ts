@@ -10,6 +10,7 @@ import type {
 import { OrdClient } from './services/OrdClient.js';
 import { BurnWatcher } from './services/BurnWatcher.js';
 import { AttestationSigner } from './services/AttestationSigner.js';
+import { BISClient } from './services/BISClient.js';
 import type { IAttestation, IOracleConfig, IVerifiedBurn } from './types/index.js';
 
 /** MongoDB collection name for detected burns */
@@ -49,6 +50,8 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
     private ordClient!: OrdClient;
     private burnWatcher!: BurnWatcher;
     private attestationSigner!: AttestationSigner;
+    private bisClient: BISClient | null = null;
+    private collectionSlug: string | null = null;
 
     /** Latest known OPNet block height — updated on every block. */
     private currentBlockHeight: number = 0;
@@ -81,6 +84,19 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
             config.vaultContractAddress,
             config.attestationTtlBlocks ?? 144,
         );
+
+        // Collection gating via Best in Slot
+        if (config.collectionSlug !== undefined) {
+            this.collectionSlug = config.collectionSlug;
+            this.bisClient = new BISClient(config.bisApiKey);
+            this.context.logger.info(
+                `OrdinalsVaultOracle: collection filter enabled — only "${config.collectionSlug}" inscriptions will be attested (via BIS)`,
+            );
+        } else {
+            this.context.logger.info(
+                `OrdinalsVaultOracle: universal mode — any inscription will be attested`,
+            );
+        }
 
         this.context.logger.info(
             `OrdinalsVaultOracle: ML-DSA-44 oracle loaded. ` +
@@ -254,6 +270,7 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
             burnsDetected,
             mempoolWatched: this.mempoolWatched.size,
             oraclePublicKeyHash: this.attestationSigner.publicKeyHash,
+            collectionSlug: this.collectionSlug ?? 'universal',
             db: dbOk,
         };
     }
@@ -311,6 +328,27 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
             blockHeight: burn['blockHeight'] as number,
             txid: burn['burnTxid'] as string,
         };
+
+        // Collection gating — query BIS to verify membership before signing
+        if (this.bisClient !== null && this.collectionSlug !== null) {
+            try {
+                const inCollection = await this.bisClient.isInCollection(
+                    verifiedBurn.inscriptionId,
+                    this.collectionSlug,
+                );
+                if (!inCollection) {
+                    this.context.logger.warn(
+                        `Attestation refused — inscription ${verifiedBurn.inscriptionId} is not in collection "${this.collectionSlug}"`,
+                    );
+                    return {
+                        error: `Inscription does not belong to collection "${this.collectionSlug}"`,
+                    };
+                }
+            } catch (err: unknown) {
+                this.context.logger.error(`BIS collection check failed: ${this.errMsg(err)}`);
+                return { error: 'Collection verification unavailable — try again later' };
+            }
+        }
 
         try {
             return this.attestationSigner.sign(verifiedBurn, this.currentBlockHeight);

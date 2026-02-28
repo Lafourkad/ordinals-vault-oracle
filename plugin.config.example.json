@@ -4,6 +4,10 @@
         "ordNodeUrl": "http://localhost:80",
         "vaultContractAddress": "64hexchars_no_0x_prefix",
         "oracleMLDSASeed": "64hexchars_secret_32bytes_entropy",
-        "attestationTtlBlocks": 144
+        "attestationTtlBlocks": 144,
+
+        "_comment_collection": "Optional — remove these two fields for a universal bridge (any inscription accepted)",
+        "collectionSlug": "bitcoin-frogs",
+        "bisApiKey": "your-bis-api-key-optional"
     }
 }

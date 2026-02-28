@@ -73,4 +73,23 @@ export interface IOracleConfig {
     readonly vaultContractAddress: string;
     /** Attestation validity window in OPNet blocks (default: 144 ≈ 1 day at ~10 min/block) */
     readonly attestationTtlBlocks?: number;
+    /**
+     * Optional: restrict attestations to inscriptions from a specific BIS collection.
+     *
+     * If set, the oracle will query Best in Slot before signing any attestation.
+     * Only inscriptions whose `collection_slug` matches this value will be attested.
+     * Burns from other collections are stored in DB but rejected at attestation time.
+     *
+     * Example: "bitcoin-frogs"
+     *
+     * Leave unset for a universal bridge (any inscription accepted).
+     */
+    readonly collectionSlug?: string;
+    /**
+     * Optional: Best in Slot API key.
+     *
+     * Free tier allows ~3 req/sec without a key. Set this for higher throughput.
+     * Get a key at https://bestinslot.xyz/account/api
+     */
+    readonly bisApiKey?: string;
 }
