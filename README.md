@@ -148,18 +148,65 @@ Copy `plugin.config.example.json` to `plugin.config.json`:
         "ordNodeUrl": "http://localhost:80",
         "vaultContractAddress": "64hexchars_no_0x_prefix",
         "oracleMLDSASeed": "64hexchars_secret_32bytes_entropy",
-        "attestationTtlBlocks": 144
+        "attestationTtlBlocks": 144,
+
+        "collectionSlug": "bitcoin-frogs",
+        "bisApiKey": "optional"
     }
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `burnAddress` | Bitcoin address where inscriptions are sent to burn (P2TR recommended) |
-| `ordNodeUrl` | Local `ord` node HTTP URL |
-| `vaultContractAddress` | Deployed OrdinalsVault contract address (64-char hex, no `0x`) |
-| `oracleMLDSASeed` | 64-char hex seed (32 bytes). Deterministically derives the ML-DSA-44 keypair. **Keep this secret.** |
-| `attestationTtlBlocks` | Attestation validity in OPNet blocks (default: 144 ≈ 1 day) |
+| Field | Required | Description |
+|-------|----------|-------------|
+| `burnAddress` | Yes | Bitcoin address where inscriptions are sent to burn (P2TR recommended) |
+| `ordNodeUrl` | Yes | Local `ord` node HTTP URL |
+| `vaultContractAddress` | Yes | Deployed OrdinalsVault contract address (64-char hex, no `0x`) |
+| `oracleMLDSASeed` | Yes | 64-char hex seed (32 bytes). Deterministically derives the ML-DSA-44 keypair. **Keep this secret.** |
+| `attestationTtlBlocks` | No | Attestation validity in OPNet blocks (default: 144 ≈ 1 day) |
+| `collectionSlug` | No | BIS collection slug (e.g. `"bitcoin-frogs"`). If set, only inscriptions from this collection will be attested. Leave unset for a universal bridge. |
+| `bisApiKey` | No | [Best in Slot](https://bestinslot.xyz/account/api) API key. Free tier works without one (~3 req/sec). Set for higher throughput. |
+
+---
+
+## Collection Gating
+
+By default the oracle runs in **universal mode** — it will attest any valid burn regardless of which Ordinals collection the inscription belongs to. Each deployed contract + oracle pair covers everything.
+
+To restrict an oracle to a specific collection, set `collectionSlug` in config:
+
+```json
+"collectionSlug": "bitcoin-frogs"
+```
+
+When this is set, the oracle queries [Best in Slot](https://api.bestinslot.xyz) before signing every attestation:
+
+```
+GET /attestation/:txid
+    │
+    └── BISClient.isInCollection(inscriptionId, "bitcoin-frogs")
+            ├── GET https://api.bestinslot.xyz/v3/inscription/info?inscription_id=...
+            ├── check collection_slug == "bitcoin-frogs"
+            ├── if mismatch → return { error: "Inscription does not belong to collection..." }
+            └── if match → sign attestation
+```
+
+Results are cached in memory — collection membership is immutable, so each inscription is only queried once per oracle lifetime.
+
+### One Oracle per Collection
+
+The recommended setup for multi-collection deployments:
+
+```
+Collection A (Bitcoin Frogs)
+  contract:  opt1sq...AAA   (oracle key hash = sha256(keyA.pubkey))
+  oracle:    collectionSlug = "bitcoin-frogs", oracleMLDSASeed = seedA
+
+Collection B (Ordinal Punks)
+  contract:  opt1sq...BBB   (oracle key hash = sha256(keyB.pubkey))
+  oracle:    collectionSlug = "ordinal-punks",  oracleMLDSASeed = seedB
+```
+
+Each oracle key only signs for its own contract. Cross-collection replay is impossible — the contract address is embedded in every attestation hash.
 
 ---
 
@@ -183,6 +230,24 @@ Returns a signed attestation for a confirmed burn transaction.
 ```
 
 Pass all fields directly to `recordBurnWithAttestation()`.
+
+### `GET /plugins/ordinals-oracle/health`
+
+Returns oracle status.
+
+```json
+{
+  "status": "ok",
+  "currentBlockHeight": 850000,
+  "uptimeSeconds": 3600,
+  "burnsDetected": 42,
+  "oraclePublicKeyHash": "64hexchars",
+  "collectionSlug": "bitcoin-frogs",
+  "db": true
+}
+```
+
+`collectionSlug` is `"universal"` when no collection filter is configured.
 
 ### `GET /plugins/ordinals-oracle/burns`
 
