@@ -50,6 +50,7 @@ export interface IAttestation {
     readonly burner: string;           // 64-char hex OPNet address (32 bytes)
     readonly deadline: number;         // OPNet block height — attestation valid until this block
     readonly nonce: string;            // 64-char hex, 32 random bytes (anti-replay)
+    readonly collectionIdHash: string; // 64-char hex, sha256(collectionSlug) — all zeros for universal
     readonly oraclePublicKey: string;  // hex, 1312-byte ML-DSA-44 public key (for calldata)
     readonly oracleSig: string;        // hex, 2420-byte ML-DSA-44 signature
 }

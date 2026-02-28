@@ -17,6 +17,7 @@ import type { IAttestation, IVerifiedBurn } from '../types/index.js';
  *     | burner (32 bytes)
  *     | deadline (8 bytes, uint64 big-endian — BLOCK HEIGHT, not timestamp)
  *     | nonce (32 bytes)
+ *     | collectionIdHash (32 bytes, u256 big-endian)
  *   )
  */
 export class AttestationSigner {
@@ -39,16 +40,25 @@ export class AttestationSigner {
     private readonly ttlBlocks: number;
 
     /**
+     * sha256(collectionSlug) as 64-char hex string (32 bytes).
+     * Included in every attestation hash to bind signatures to a specific collection.
+     * Set to '00'.repeat(32) for universal mode (any inscription).
+     */
+    private readonly collectionIdHash: string;
+
+    /**
      * @param oracleMLDSASeed     - 64-char hex string (32 bytes entropy). Deterministically
      *                              derives the ML-DSA-44 keypair. Keep this secret — it controls
      *                              the oracle's signing authority.
      * @param contractAddress     - OPNet contract address (hex, 64 chars, no 0x prefix).
      * @param ttlBlocks           - Attestation TTL in blocks (default 144 ≈ 1 day at ~10 min/block).
+     * @param collectionIdHash    - sha256(collectionSlug) as hex, or all-zeros for universal.
      */
     public constructor(
         oracleMLDSASeed: string,
         contractAddress: string,
         ttlBlocks: number = 144,
+        collectionIdHash: string = '0'.repeat(64),
     ) {
         if (oracleMLDSASeed.length !== 64) {
             throw new Error(
@@ -69,6 +79,7 @@ export class AttestationSigner {
 
         this.contractAddress = contractAddress.replace(/^0x/, '').toLowerCase();
         this.ttlBlocks = ttlBlocks;
+        this.collectionIdHash = collectionIdHash.replace(/^0x/, '').toLowerCase();
     }
 
     /**
@@ -107,6 +118,7 @@ export class AttestationSigner {
             burner: burn.burnerOpnetAddress,
             deadline,
             nonce: bytesToHex(nonce),
+            collectionIdHash: this.collectionIdHash,
             oraclePublicKey: bytesToHex(this.publicKey),
             oracleSig: bytesToHex(sig),
         };
@@ -134,6 +146,7 @@ export class AttestationSigner {
         const contractBytes = hexToBytes(this.contractAddress);
         const inscBytes = textEncode(inscriptionId);
         const burnerBytes = hexToBytes(burnerHex);
+        const collectionBytes = hexToBytes(this.collectionIdHash);
 
         // inscriptionId length as 4-byte big-endian uint32
         const lenBytes = new Uint8Array(4);
@@ -144,6 +157,7 @@ export class AttestationSigner {
         new DataView(deadlineBytes.buffer).setBigUint64(0, BigInt(deadline), false);
 
         // nonce as 32 bytes (already Uint8Array)
+        // collectionIdHash as 32 bytes (u256 big-endian)
         const message = concatBytes(
             contractBytes,
             lenBytes,
@@ -151,6 +165,7 @@ export class AttestationSigner {
             burnerBytes,
             deadlineBytes,
             nonce,
+            collectionBytes,
         );
 
         return new Uint8Array(createHash('sha256').update(message).digest());

@@ -79,15 +79,28 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
 
         this.ordClient = new OrdClient(config.ordNodeUrl);
         this.burnWatcher = new BurnWatcher(this.ordClient, config.burnAddress);
-        this.attestationSigner = new AttestationSigner(
-            config.oracleMLDSASeed,
-            config.vaultContractAddress,
-            config.attestationTtlBlocks ?? 144,
-        );
+
+        // Compute collectionIdHash = sha256(collectionSlug) as hex, or all-zeros for universal
+        let collectionIdHashHex = '0'.repeat(64);
 
         // Collection gating via Best in Slot
         if (config.collectionSlug !== undefined) {
             this.collectionSlug = config.collectionSlug;
+            const { createHash } = await import('crypto');
+            const hashBytes = createHash('sha256')
+                .update(config.collectionSlug, 'utf8')
+                .digest();
+            collectionIdHashHex = hashBytes.toString('hex');
+        }
+
+        this.attestationSigner = new AttestationSigner(
+            config.oracleMLDSASeed,
+            config.vaultContractAddress,
+            config.attestationTtlBlocks ?? 144,
+            collectionIdHashHex,
+        );
+
+        if (config.collectionSlug !== undefined) {
             this.bisClient = new BISClient(config.bisApiKey);
             this.context.logger.info(
                 `OrdinalsVaultOracle: collection filter enabled — only "${config.collectionSlug}" inscriptions will be attested (via BIS)`,
