@@ -1,25 +1,41 @@
 # ordinals-vault-oracle
 
-An [OPNet](https://opnet.org) node plugin that bridges Bitcoin Ordinals to OP721 tokens on OPNet.
+An [OPNet](https://opnet.org) node plugin that acts as a bridge oracle for [OrdinalsVault](https://github.com/Lafourkad/ordinals-vault).
 
-Watches every Bitcoin block for Ordinal burn transactions, verifies them against a local `ord` node, and calls `recordBurn()` on the deployed [OrdinalsVault](https://github.com/Lafourkad/ordinals-vault) contract.
+Watches every Bitcoin block for Ordinal burn transactions, verifies them against a local `ord` node, and calls `recordBurn()` on the OrdinalsVault contract to attest the burn on-chain. The user then claims their OP721 token by calling `mint()` from their own OPNet wallet.
 
 ---
 
 ## How It Works
 
-### Burn Transaction Format
+### Two-Step Bridge
 
-To bridge an Ordinal to OPNet, the user sends a Bitcoin transaction with this exact structure:
+**Step 1 — Burn (Bitcoin)**
+
+The user sends a Bitcoin transaction burning their inscription:
 
 ```
 vin[0]:   UTXO holding the inscription
-vout[0]:  <burnAddress>                        ← inscription lands here
-vout[1]:  OP_RETURN <opnet_address_32_bytes>   ← who receives the OP721 mint
+vout[0]:  <burnAddress>                        ← inscription is sent here
+vout[1]:  OP_RETURN <opnet_address_32_bytes>   ← OPNet address allowed to claim the mint
 vout[2]:  change (optional)
 ```
 
-The 32-byte OPNet address in the `OP_RETURN` tells the oracle which OPNet account gets the minted OP721 token.
+The 32-byte OPNet address in `OP_RETURN` locks the future mint to that specific OPNet account — only that address can call `mint()` for this inscription.
+
+**Step 2 — Attest (Oracle)**
+
+The oracle detects the burn, verifies the inscription via the local ord node, and submits an attestation to the contract:
+
+```
+contract.recordBurn(inscriptionId, burnerOpnetAddress)
+```
+
+This records that the inscription has been burned and which OPNet address is authorised to claim it. No token is minted yet.
+
+**Step 3 — Mint (User)**
+
+The user calls `mint(inscriptionId)` from their OPNet wallet. The contract checks that `tx.sender == recordedBurner` and mints the OP721 token to them.
 
 ### Oracle Pipeline
 
@@ -28,14 +44,14 @@ onBlockPreProcess(IBlockData)
     │
     ├── BurnWatcher.scanBlock()
     │       ├── detect output → burnAddress
-    │       ├── extract burner OPNet address from OP_RETURN
+    │       ├── extract claimant OPNet address from OP_RETURN
     │       └── for each input UTXO:
-    │               query local ord → GET /output/{txid}:{vout}
+    │               GET /output/{txid}:{vout}  [local ord node]
     │               → returns inscription IDs on that UTXO
     │
     └── ContractCaller.submitBurn()
             ├── getContract<IOrdinalsVaultOracle>(vaultAddress, ABI, provider)
-            ├── simulate contract.recordBurn(inscriptionId, burnerAddress)
+            ├── simulate contract.recordBurn(inscriptionId, claimantAddress)
             └── sign + broadcast with oracle keypair (WIF)
 ```
 
