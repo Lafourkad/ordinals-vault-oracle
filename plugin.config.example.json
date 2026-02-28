@@ -1,0 +1,11 @@
+{
+    "oracle": {
+        "vaultContractAddress": "op1q...",
+        "burnAddress": "bc1p...",
+        "ordNodeUrl": "http://localhost:80",
+        "opnetRpcUrl": "https://mainnet.opnet.org/json-rpc",
+        "oraclePrivateKeyWIF": "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFuHMHx",
+        "maxSatToSpend": 10000,
+        "network": "mainnet"
+    }
+}

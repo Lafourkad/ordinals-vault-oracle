@@ -1,0 +1,53 @@
+{
+    "name": "ordinals-vault-oracle",
+    "version": "1.0.0",
+    "description": "Watches Bitcoin blocks for Ordinal burns and calls recordBurn() on OrdinalsVault",
+    "opnetVersion": "^1.0.0",
+    "main": "dist/index.jsc",
+    "target": "bytenode",
+    "type": "plugin",
+    "checksum": "sha256:placeholder",
+    "author": {
+        "name": "OrdinalsVault"
+    },
+    "license": "Apache-2.0",
+    "pluginType": "standalone",
+    "permissions": {
+        "database": {
+            "enabled": true,
+            "collections": ["oracle_burns"]
+        },
+        "blocks": {
+            "preProcess": true,
+            "postProcess": false,
+            "onChange": false
+        },
+        "epochs": {
+            "onChange": false,
+            "onFinalized": false
+        },
+        "mempool": {
+            "txFeed": false
+        },
+        "api": {
+            "addEndpoints": false,
+            "addWebsocket": false
+        },
+        "filesystem": {
+            "configDir": true,
+            "tempDir": false
+        }
+    },
+    "resources": {
+        "memory": {
+            "maxHeapMB": 256
+        },
+        "timeout": {
+            "hookMs": 30000
+        }
+    },
+    "lifecycle": {
+        "loadPriority": 50,
+        "enabledByDefault": true
+    }
+}
