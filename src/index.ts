@@ -6,7 +6,6 @@ import type {
     IPluginRouter,
     IReorgData,
 } from '@btc-vision/plugin-sdk';
-import { networks } from '@btc-vision/bitcoin';
 import { OrdClient } from './services/OrdClient.js';
 import { BurnWatcher } from './services/BurnWatcher.js';
 import { AttestationSigner } from './services/AttestationSigner.js';
@@ -29,19 +28,18 @@ type HandlerResult<T> = T | { readonly error: string };
  *
  * 2. SERVE attestations via HTTP (GET /attestation/:txid).
  *    When a user requests an attestation for their burn TX, the oracle signs
- *    it off-chain using Schnorr (BIP340) and returns the signature.
+ *    it off-chain using ML-DSA-44 (FIPS 204, post-quantum) and returns the signature.
  *    The user submits it to the contract themselves — oracle pays ZERO gas.
  *
  * Plugin config (plugin.config.json):
  * ```json
  * {
  *   "oracle": {
- *     "burnAddress":            "bc1p...",
- *     "ordNodeUrl":             "http://localhost:80",
- *     "vaultContractAddress":   "op1q...",
- *     "oraclePrivateKeyWIF":    "KwDiBf...",
- *     "attestationTtlSeconds":  3600,
- *     "network":                "mainnet"
+ *     "burnAddress":           "bc1p...",
+ *     "ordNodeUrl":            "http://localhost:80",
+ *     "vaultContractAddress":  "64hexchars",
+ *     "oracleMLDSASeed":       "64hexchars",
+ *     "attestationTtlBlocks":  144
  *   }
  * }
  * ```
@@ -51,6 +49,9 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
     private burnWatcher!: BurnWatcher;
     private attestationSigner!: AttestationSigner;
 
+    /** Latest known OPNet block height — updated on every block. */
+    private currentBlockHeight: number = 0;
+
     public override async onLoad(context: IPluginContext): Promise<void> {
         await super.onLoad(context);
 
@@ -59,15 +60,17 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
             throw new Error('OrdinalsVaultOracle: missing "oracle" config section');
         }
 
-        const network = config.network === 'mainnet' ? networks.bitcoin : networks.regtest;
-
         this.ordClient = new OrdClient(config.ordNodeUrl);
         this.burnWatcher = new BurnWatcher(this.ordClient, config.burnAddress);
         this.attestationSigner = new AttestationSigner(
-            config.oraclePrivateKeyWIF,
+            config.oracleMLDSASeed,
             config.vaultContractAddress,
-            network,
-            config.attestationTtlSeconds ?? 3600,
+            config.attestationTtlBlocks ?? 144,
+        );
+
+        this.context.logger.info(
+            `OrdinalsVaultOracle: ML-DSA-44 oracle loaded. ` +
+            `Public key hash (register in contract): ${this.attestationSigner.publicKeyHash}`,
         );
 
         if (this.context.db !== undefined) {
@@ -80,7 +83,7 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
         }
 
         this.context.logger.info(
-            `OrdinalsVaultOracle loaded — watching burns to ${config.burnAddress} (gasless mode)`,
+            `OrdinalsVaultOracle loaded — watching burns to ${config.burnAddress} (gasless ML-DSA-44 mode)`,
         );
     }
 
@@ -105,6 +108,8 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
      * @param block - Raw Bitcoin block data
      */
     public override async onBlockPreProcess(block: IBlockData): Promise<void> {
+        this.currentBlockHeight = block.height;
+
         let burns: readonly IVerifiedBurn[];
 
         try {
@@ -211,7 +216,7 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
         };
 
         try {
-            return this.attestationSigner.sign(verifiedBurn);
+            return this.attestationSigner.sign(verifiedBurn, this.currentBlockHeight);
         } catch (err: unknown) {
             this.context.logger.error(`Attestation signing failed: ${this.errMsg(err)}`);
             return { error: 'Attestation signing failed' };

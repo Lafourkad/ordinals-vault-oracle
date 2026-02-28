@@ -1,10 +1,9 @@
 {
     "oracle": {
-        "burnAddress":           "bc1p...",
-        "ordNodeUrl":            "http://localhost:80",
-        "vaultContractAddress":  "op1q...",
-        "oraclePrivateKeyWIF":   "KwDiBf...",
-        "attestationTtlSeconds": 3600,
-        "network":               "mainnet"
+        "burnAddress": "bc1p...",
+        "ordNodeUrl": "http://localhost:80",
+        "vaultContractAddress": "64hexchars_no_0x_prefix",
+        "oracleMLDSASeed": "64hexchars_secret_32bytes_entropy",
+        "attestationTtlBlocks": 144
     }
 }

@@ -16,14 +16,20 @@ export interface IVerifiedBurn {
     readonly txid: string;
 }
 
-/** Oracle attestation returned to the user */
+/**
+ * Oracle attestation returned to the user.
+ *
+ * The user must pass `oraclePublicKey` + `oracleSig` to `recordBurnWithAttestation`.
+ * `deadline` is an OPNet block height (tamper-proof, not a UNIX timestamp).
+ */
 export interface IAttestation {
     readonly txid: string;
     readonly inscriptionId: string;
-    readonly burner: string;       // 64-char hex OPNet address
-    readonly deadline: number;     // UNIX timestamp (seconds) — block.medianTime deadline
-    readonly nonce: string;        // 64-char hex, 32 random bytes
-    readonly oracleSig: string;    // 128-char hex, 64-byte Schnorr signature
+    readonly burner: string;           // 64-char hex OPNet address (32 bytes)
+    readonly deadline: number;         // OPNet block height — attestation valid until this block
+    readonly nonce: string;            // 64-char hex, 32 random bytes (anti-replay)
+    readonly oraclePublicKey: string;  // hex, 1312-byte ML-DSA-44 public key (for calldata)
+    readonly oracleSig: string;        // hex, 2420-byte ML-DSA-44 signature
 }
 
 /** Oracle plugin config */
@@ -32,12 +38,17 @@ export interface IOracleConfig {
     readonly burnAddress: string;
     /** Local ord node HTTP URL */
     readonly ordNodeUrl: string;
-    /** Attestation validity window in seconds (default: 3600 = 1 hour) */
-    readonly attestationTtlSeconds?: number;
-    /** Oracle secp256k1 private key WIF — used for off-chain Schnorr signing */
-    readonly oraclePrivateKeyWIF: string;
-    /** Bitcoin network */
-    readonly network: 'mainnet' | 'regtest';
-    /** OPNet contract address — included in hash to prevent cross-contract replay */
+    /**
+     * 64-char hex string (32 bytes entropy).
+     * Deterministically derives the ML-DSA-44 keypair.
+     * Keep this secret — it controls the oracle's signing authority.
+     *
+     * The corresponding oracle public key hash (sha256 of the 1312-byte public key)
+     * must be registered in the contract via `_oracleKeyHash` at deployment or via `setOracle()`.
+     */
+    readonly oracleMLDSASeed: string;
+    /** OPNet contract address (hex, 64 chars, no 0x prefix) — included in hash to prevent cross-contract replay */
     readonly vaultContractAddress: string;
+    /** Attestation validity window in OPNet blocks (default: 144 ≈ 1 day at ~10 min/block) */
+    readonly attestationTtlBlocks?: number;
 }
