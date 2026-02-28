@@ -140,26 +140,18 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
      * If ord hasn't indexed the mempool TX yet (404), we fall back to normal
      * block scanning when the TX confirms.
      */
+    /**
+     * Called for each transaction entering the mempool.
+     *
+     * We record the txid for health monitoring only.
+     * Burns are NEVER stored from unconfirmed transactions — an unconfirmed TX
+     * can be replaced (RBF) or double-spent, which would allow a user to mint
+     * an OP721 and then recover their inscription.
+     *
+     * Burn detection only happens in onBlockPreProcess (confirmed blocks).
+     */
     public override async onMempoolTransaction(tx: IMempoolTransaction): Promise<void> {
         this.mempoolWatched.add(tx.txid);
-
-        let burns: readonly IVerifiedBurn[];
-        try {
-            burns = await this.burnWatcher.scanMempoolTx(tx.txid);
-        } catch {
-            // ord unavailable or TX not indexed yet — block scan will catch it
-            return;
-        }
-
-        if (burns.length === 0) return;
-
-        this.context.logger.info(
-            `Mempool: ${burns.length.toString()} burn(s) detected in unconfirmed TX ${tx.txid}`,
-        );
-
-        for (const burn of burns) {
-            await this.storeBurn(burn);
-        }
     }
 
     public override async onBlockPreProcess(block: IBlockData): Promise<void> {
@@ -237,10 +229,9 @@ export default class OrdinalsVaultOraclePlugin extends PluginBase {
      * `status` is "ok" when the oracle is operational.
      * `status` is "degraded" when the database is unavailable (burns cannot be stored).
      *
-     * ⚠️  A successful health check does NOT guarantee the oracle will still be
-     * online when your burn confirms. Attestations are valid for `ttlBlocks` OPNet
-     * blocks (~24h at default settings), so the oracle can go offline briefly after
-     * your burn and you can still claim once it comes back.
+     * Burns are only attested after Bitcoin block confirmation — never from mempool.
+     * Attestations are valid for `ttlBlocks` OPNet blocks (~24h at default settings).
+     * If the oracle is online when your burn confirms, your attestation will be ready.
      */
     public async handleHealth(_request: IPluginHttpRequest): Promise<object> {
         const dbOk = this.context.db !== undefined;
